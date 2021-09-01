@@ -1,0 +1,99 @@
+---
+- hosts: fortigates
+  collections:
+   - fortinet.fortios
+  connection: httpapi
+  vars:
+    vdom: "root"
+    host: "192.168.1.99"
+    fortios_firmware_new_version: v6.4.7
+    new_firmware_image_path: "./fortigate_images/FGT_100F-v6-build1911-FORTINET.out"
+    ansible_httpapi_use_ssl: yes
+    ansible_httpapi_validate_certs: no
+    ansible_httpapi_port: 443
+    ansible_network_os: fortios
+    date: "{{ lookup('pipe', 'date +%Y%m%d') }}"
+
+  tasks:
+    - name: Obtain current version
+      fortios_configuration_fact:
+        vdom: "{{ vdom }}"
+        selector: "log_custom-field"
+      register: output
+    - debug:
+        msg:
+          - "Current version : {{ output.meta.version }}"
+
+    - name: Verifier que le Fortios n'a pas deja la derniere version
+      ignore_errors: yes
+      assert:
+        that:
+          - fortios_firmware_new_version != output.meta.version
+      register: assertion_output
+    - meta: end_play
+      when: assertion_output.msg != "All assertions passed"
+    - debug:
+        msg:
+          - "Le FortiOS n'est pas compliant, start upgrade..."
+
+
+    - name: Backup la configuration globale
+      fortios_monitor_fact:
+        selector: "system_config_backup"
+        params:
+          destination: "/home/ionut/Projects/SF2I/Clients/MK2/fortigate/upgrade-playbook/backup_config_{{ host }}_{{ date }}.txt"
+          scope: "global"
+      register: fortios_backup_result
+
+    - debug:
+        msg:
+          - "Opération : {{ fortios_backup_result.meta.status }}"
+
+    - local_action: copy content={{ fortios_backup_result.meta.raw }} dest=./backup_config_{{ host }}_{{ date }}.txt
+
+
+    - name: Upgrader l'image firmware...
+      fortios_monitor:
+        selector: 'upgrade.system.firmware'
+        vdom:  "{{ vdom }}"
+        params:
+          filename: "fortigate_images/FGT_100F-v6-build1723-FORTINET.out"
+          file_content: "{{ lookup( 'file', '{{ new_firmware_image_path }}') | string | b64encode }}"
+          source: "upload"
+      register: fortios_upgrade_result
+      vars:
+        ansible_command_timeout: 600
+
+    - debug:
+        var:
+          # please check the following status to confirm
+          fortios_upgrade_result.meta.status
+
+    - name: Wait for host to come back online
+      wait_for:
+        host: "{{ host }}"
+        port: 443
+        delay: 5
+      delegate_to: localhost
+
+    - debug:
+        msg:
+          - "Forti online..."
+
+    - name: Obtain current version
+      fortios_configuration_fact:
+        vdom: "{{ vdom }}"
+        selector: "log_custom-field"
+      register: output
+
+    - name: Verifier que le Fortios a etait upgradé
+      assert:
+        that:
+          - fortios_firmware_new_version == output.meta.version
+      register: assertion_output
+
+    - debug:
+        msg:
+          - "Le FortiOS a etait upgradé à la version {{ fortios_firmware_new_version }} Goodbye!"
+    - meta: end_play
+      when: assertion_output.msg == "All assertions passed"
